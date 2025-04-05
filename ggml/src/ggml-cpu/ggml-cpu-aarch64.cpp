@@ -948,6 +948,58 @@ static void ggml_gemv_q4_0_4x8_q8_0(int n, float * GGML_RESTRICT s, size_t bs, c
     UNUSED(ncols_interleaved);
     UNUSED(blocklen);
 
+#if ! ((defined(_MSC_VER)) && ! defined(__clang__)) && defined(__aarch64__) && defined(__ARM_FEATURE_SVE) 
+if (ggml_cpu_has_sve() && ggml_cpu_get_sve_cnt() == QK8_0/2) {
+    const svbool_t pg8=svptrue_b8();
+    const svbool_t pg32=svptrue_b32();
+    static const uint32_t indices[] = {0, 2, 1, 3};
+    const block_q4_0x4 * b_ptr = (const block_q4_0x4 *) vx;
+    #pragma unroll(4)
+    for (int c = 0; c < nc; c += ncols_interleaved) {
+        const block_q8_0 * a_ptr = (const block_q8_0 *) vy;
+        svfloat32_t acc= svdup_n_f32(0.0f);
+        #pragma unroll(4)
+        for (int b = 0; b < nb; b++) {
+            svint8_t b0 = svldnt1_s8(pg8,(const int8_t *) b_ptr->qs);
+            svint8_t b1 = svldnt1_s8(pg8,(const int8_t *) b_ptr->qs+16);
+            svint8_t b2 = svldnt1_s8(pg8,(const int8_t *) b_ptr->qs+32);
+            svint8_t b3 = svldnt1_s8(pg8,(const int8_t *) b_ptr->qs+48);
+
+            svint8_t a0 =svreinterpret_s8_u64(svdup_n_u64(*((const uint64_t *)a_ptr->qs)));
+            svint8_t a1 =svreinterpret_s8_u64(svdup_n_u64(*((const uint64_t *)a_ptr->qs+1)));
+            svint8_t a2 =svreinterpret_s8_u64(svdup_n_u64(*((const uint64_t *)a_ptr->qs+2)));
+            svint8_t a3 =svreinterpret_s8_u64(svdup_n_u64(*((const uint64_t *)a_ptr->qs+3)));
+
+            float32_t scale[]={GGML_FP16_TO_FP32(b_ptr->d[0])*GGML_FP16_TO_FP32(a_ptr->d),
+                                GGML_FP16_TO_FP32(b_ptr->d[1])*GGML_FP16_TO_FP32(a_ptr->d),
+                                GGML_FP16_TO_FP32(b_ptr->d[2])*GGML_FP16_TO_FP32(a_ptr->d),
+                                GGML_FP16_TO_FP32(b_ptr->d[3])*GGML_FP16_TO_FP32(a_ptr->d)};
+
+            svint32_t ret0 = svdup_n_s32(0);
+            svint32_t ret1 = svdup_n_s32(0);
+
+            ret0 = svdot_s32(ret0, b0 << 4, a0);
+            ret1 = svdot_s32(ret1, b1 << 4, a0);
+            ret0 = svdot_s32(ret0, b2 << 4, a1);
+            ret1 = svdot_s32(ret1, b3 << 4, a1);
+
+            ret0 = svdot_s32(ret0, b0 & 0xf0U, a2);
+            ret1 = svdot_s32(ret1, b1 & 0xf0U, a2);
+            ret0 = svdot_s32(ret0, b2 & 0xf0U, a3);
+            ret1 = svdot_s32(ret1, b3 & 0xf0U, a3);
+
+            svint32_t ret = svtbl_s32(svaddp_s32_m(pg32, ret0, ret1),svld1_u32(pg32,indices));
+            acc = svmla_f32_x(pg32,acc,svcvt_f32_s32_x(pg32,ret>>4),svld1(pg32,scale));
+            a_ptr++;
+            b_ptr++;
+        }
+        svst1_f32(pg32,s,acc);
+        s += ncols_interleaved;
+    }
+    return;
+} 
+#endif 
+
 #if ! ((defined(_MSC_VER)) && ! defined(__clang__)) && defined(__aarch64__) && defined(__ARM_NEON) && defined(__ARM_FEATURE_DOTPROD)
     if (ggml_cpu_has_neon() && ggml_cpu_has_dotprod()) {
         const block_q4_0x4 * b_ptr = (const block_q4_0x4 *) vx;
